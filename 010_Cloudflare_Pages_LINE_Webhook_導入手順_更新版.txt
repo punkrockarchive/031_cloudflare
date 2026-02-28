@@ -1,0 +1,207 @@
+Cloudflare Pages + LINE Webhook 導入手順（今回構成用）
+============================================================
+
+■ 全体構成
+LINE → Cloudflare（Webhook受信）→ Cloudflare内保存 → Piが取得
+
+前提
+・外部 → Pi 不可
+・Webhookは外部公開必須
+・/u/* 中継ページもCloudflare想定
+
+
+============================================================
+STEP 1：Cloudflareアカウント作成
+============================================================
+
+1. https://www.cloudflare.com/ にアクセス
+2. Sign Up（無料でOK）
+   ・メールアドレス
+   ・パスワード
+   ・無料プランで問題なし
+
+※ ドメイン登録は不要（Pagesは pages.dev ドメインが自動付与）
+
+
+============================================================
+STEP 2：Cloudflare Pages プロジェクト作成（詳細）
+============================================================
+
+0) 事前準備（共通）
+・Cloudflareにログイン
+・左メニュー「Workers & Pages」へ移動
+・「Create application」→「Pages」
+
+以降は A) Git連携 か B) Direct Upload のどちらかで進める。
+
+
+------------------------------------------------------------
+A) Git連携（推奨：今後の更新がラク）
+------------------------------------------------------------
+
+A-1. GitHub連携（初回のみ）
+1. 「Connect to Git」→ GitHub を選択
+2. 「Authorize Cloudflare」
+3. 対象リポジトリへのアクセス権を許可（All でも Selected でもOK）
+
+A-2. Pages プロジェクト作成
+1. 「Create a project」
+2. GitHub のリポジトリ一覧から対象リポジトリを選択
+3. 「Set up builds and deployments」画面で設定
+
+A-3. 推奨設定（今回の“静的 + Functions”構成）
+・Framework preset：None（もしくは “None” 相当）
+・Build command：空（または “none”）
+・Build output directory：public
+  → index.html を public/ に置く前提
+・Root directory：空（リポジトリ直下を使う）
+
+A-4. デプロイ
+1. 「Save and Deploy」
+2. Deployments で「Success」になるまで待つ
+3. 付与された URL（例：https://xxxx.pages.dev）へアクセスして表示確認
+
+A-5. ありがちな詰まりポイント（Git連携）
+・Build output directory が違うと「ページが見つかりません」になりやすい
+  - index.html を public/ に置いた → output は public
+  - index.html を 直下(/) に置いた → output は “/”（UI上では指定できないことがあるので public 推奨）
+
+
+------------------------------------------------------------
+B) Direct Upload（最短：まず動かしたい）
+------------------------------------------------------------
+
+B-1. フォルダを作る（例：cf-pages/）
+・次の構成でフォルダを作成：
+
+cf-pages/
+├─ public/
+│   └─ index.html
+└─ functions/
+   └─ api/
+      └─ line/
+         └─ webhook.ts   （※STEP3で作る）
+
+B-2. ZIP化の注意（重要）
+・ZIPの「中身の直下」に public/ と functions/ が来るようにする
+  OK：ZIPを開いたら public/ と functions/ が見える
+  NG：ZIPを開いたら cf-pages/ が見えて、その中に public/ がある（1階層深い）
+
+B-3. Pagesでアップロード
+1. Pages → 「Create a project」
+2. 「Direct Upload」
+3. プロジェクト名を入力（例：sawara-dpf）
+4. ZIPをアップロード → Deploy
+
+B-4. 表示確認
+1. Deployments で「Success」確認
+2. 付与URL（例：https://sawara-dpf.pages.dev）にアクセス
+3. public/index.html の内容（HelloWorld 等）が表示されればOK
+
+B-5. ありがちな詰まりポイント（Direct Upload）
+・ZIP階層が1段深い → 404になりやすい
+・public/index.html が無い/ファイル名が違う（index.htm 等）→ 404になりやすい
+
+
+============================================================
+STEP 3：プロジェクト構成（今回用途：詳細）
+============================================================
+
+目的
+・/u/* → 署名付きリンク検証 → pickerUri へ 302 リダイレクト
+・/api/line/webhook → LINE Webhook受信（userId取得の入口）
+
+推奨ディレクトリ構成（Git連携でもDirect Uploadでも同じ）
+
+/
+├─ public/
+│   └─ index.html
+└─ functions/
+   ├─ u/
+   │  └─ [...path].ts
+   └─ api/
+      └─ line/
+         └─ webhook.ts
+
+ポイント（重要）
+1) public/ は「静的コンテンツ」
+・https://<project>.pages.dev/ は public/index.html が返る
+・public/ に index.html が無いと 404 になりやすい
+
+2) functions/ は「API（Pages Functions）」
+・functions/api/line/webhook.ts → /api/line/webhook
+・functions/u/[...path].ts → /u/ から始まる任意パスにマッチ（catch-all）
+
+3) ルーティングの対応表
+・/                       → public/index.html
+・/api/line/webhook        → functions/api/line/webhook.ts
+・/u/<payload>.<sig>       → functions/u/[...path].ts
+
+4) 動作確認（STEP3完了チェック）
+・静的：
+  - https://<project>.pages.dev/ が表示される（HelloWorld等）
+・API：
+  - https://<project>.pages.dev/api/line/webhook にアクセスすると
+    （まだ実装前なら）404でOK
+    （実装後は）POSTで200を返すのがゴール
+
+5) よくある混乱
+・「/functions 配下が API」＝ “ブラウザから functions/ を開く” ではない
+  - functions/ は “URLのパス” ではなく “サーバー側のコード置き場”
+  - URLとしては /api/... や /u/... に出る
+
+
+============================================================
+STEP 4：Webhook URL確定
+============================================================
+
+Cloudflareが発行するURL例：
+https://sawara-dpf.pages.dev
+
+Webhook URL（LINE Developers に設定する値）：
+https://sawara-dpf.pages.dev/api/line/webhook
+
+※「api/line/webhook」だけ（相対パス）は不可。必ず https:// からのフルURL。
+
+
+============================================================
+STEP 5：Cloudflare環境変数設定
+============================================================
+
+署名検証に必要：
+
+LINE_CHANNEL_SECRET=xxxxxxxxxxxxxxxx
+
+設定方法：
+1. Pagesプロジェクト → Settings
+2. Environment Variables
+3. 追加（Production と Preview 両方に入れるのが安全）
+
+
+============================================================
+STEP 6：事前確認
+============================================================
+
+Webhook設定前に確認：
+・Deployments が Success か
+・HTTPSでアクセスできるか
+・（実装後）POSTを受けて200を返すか
+
+
+============================================================
+料金について
+============================================================
+
+無料プランで問題なし。
+
+・Pages + Functions は無料枠あり
+・1日100,000リクエスト無料枠（十分）
+
+
+============================================================
+セキュリティ重要ポイント
+============================================================
+
+・Webhookは必ず署名検証する
+・Cloudflare側で userId を保存
+・Piへは pull方式で取得する
