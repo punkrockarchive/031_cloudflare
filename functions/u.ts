@@ -18,7 +18,7 @@ export const onRequestGet: PagesFunction<{
   SIGNED_URL_SECRET_A: string;
 }> = async (context) => {
   // デプロイ反映確認用（好きな文字列でOK。毎回変える）
-  const BUILD = "u.ts-2026-03-03-0805";
+  const BUILD = "u.ts-2026-03-03-0847";
 
   const { env, request } = context;
 
@@ -79,12 +79,19 @@ export const onRequestGet: PagesFunction<{
 
   // dbg=1 のときは KVの実体を確認（秘密は出さない）
   if (dbg) {
+    const parsed = raw ? parseKvMaybeDoubleJson(raw) : null;
+
     return new Response(
       JSON.stringify(
         {
+          build: BUILD,
           sid: payload.sid,
           hasRaw: !!raw,
           rawPreview: raw ? raw.slice(0, 160) : null,
+          parsedType: parsed ? typeof parsed : null,
+          parsedKeys: parsed && typeof parsed === "object" ? Object.keys(parsed) : null,
+          parsedPickerUri: parsed?.pickerUri ?? null,
+          parsedExp: parsed?.exp ?? null,
           now,
           payloadExp: payload.exp,
         },
