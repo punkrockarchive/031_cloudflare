@@ -5,11 +5,11 @@ export const onRequestGet: PagesFunction<{
   const { env, params } = context;
 
   const token = String(params.token || "");
-  const dot = token.lastIndexOf(".");
-  if (dot <= 0) return new Response("Not Found", { status: 404 });
+  const sep = token.lastIndexOf("~");
+  if (sep <= 0) return new Response("Not Found", { status: 404 });
 
-  const payloadB64 = token.slice(0, dot);
-  const sigB64 = token.slice(dot + 1);
+  const payloadB64 = token.slice(0, sep);
+  const sigB64 = token.slice(sep + 1);
 
   // 署名検証
   const expected = await hmacBase64Url(payloadB64, env.SIGNED_URL_SECRET_A);
