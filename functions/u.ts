@@ -10,9 +10,6 @@
  */
 
 export const onRequestGet: PagesFunction<{
-  // デプロイ反映確認用（好きな文字列でOK。毎回変える）
-  const BUILD = "u.ts-2026-03-03-0805";
-  
   // Pages の「設定 > バインディング」で
   // KV名前空間の変数名を GP_SESSIONS にしていること
   GP_SESSIONS: KVNamespace;
@@ -20,6 +17,9 @@ export const onRequestGet: PagesFunction<{
   // Pages の「設定 > 環境変数」で SIGNED_URL_SECRET_A を設定していること
   SIGNED_URL_SECRET_A: string;
 }> = async (context) => {
+  // デプロイ反映確認用（好きな文字列でOK。毎回変える）
+  const BUILD = "u.ts-2026-03-03-0805";
+
   const { env, request } = context;
 
   // URL解析（クエリ取得用）
