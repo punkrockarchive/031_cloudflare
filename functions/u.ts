@@ -74,16 +74,17 @@ export const onRequestGet: PagesFunction<{
    * - get(..., "json") は環境差分で挙動が読みづらいので text で確実に取る
    * - JSON 文字列を parse して pickerUri / exp を取り出す
    */
+  // KVから取得（textで確実に読む）
   const raw = await env.GP_SESSIONS.get(payload.sid);
 
-  // dbg=1 のときは、KVが取れているかを返す（秘密は出さない）
+  // dbg=1 のときは KVの実体を確認（秘密は出さない）
   if (dbg) {
     return new Response(
       JSON.stringify(
         {
           sid: payload.sid,
           hasRaw: !!raw,
-          rawPreview: raw ? raw.slice(0, 120) : null,
+          rawPreview: raw ? raw.slice(0, 160) : null,
           now,
           payloadExp: payload.exp,
         },
@@ -100,36 +101,21 @@ export const onRequestGet: PagesFunction<{
     );
   }
 
-  // KVに無い（または別Namespaceを見ている）場合
-  if (!raw) {
-    return html("リンクが無効です。LINEから最新リンクを開いてください。");
-  }
+  if (!raw) return html("リンクが無効です。LINEから最新リンクを開いてください。");
 
-  // KVの中身（JSON想定）
-  let pickerUri: string | undefined;
-  let exp: number | undefined;
+  // KVの値は「JSONオブジェクト」または「JSON文字列（＝二重JSON）」の可能性があるため吸収する
+  const parsed = parseKvMaybeDoubleJson(raw);
 
-  try {
-    const obj = JSON.parse(raw);
-    // 正本キーは pickerUri
-    pickerUri = obj?.pickerUri;
-    exp = obj?.exp;
-  } catch {
-    // 念のため、JSONでなければURL直書きとみなす（暫定フォールバック）
-    pickerUri = raw;
-  }
+  const pickerUri = parsed?.pickerUri;
+  const exp = parsed?.exp;
 
-  // 値の妥当性チェック
   if (!pickerUri || typeof pickerUri !== "string") {
     return html("リンクが無効です。LINEから最新リンクを開いてください。");
   }
-
-  // KV側の期限チェック（あれば）
   if (typeof exp === "number" && exp < now) {
     return html("リンクの有効期限が切れています。LINEから最新リンクを開いてください。");
   }
 
-  // 目的地へ 302 リダイレクト
   return Response.redirect(pickerUri, 302);
 };
 
@@ -198,4 +184,29 @@ function timingSafeEqual(a: string, b: string): boolean {
   let out = 0;
   for (let i = 0; i < a.length; i++) out |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return out === 0;
+}
+
+/**
+ * KVの値が以下どちらでも同じ形にするためのパーサ
+ * 1) {"pickerUri":"...","exp":...}  ← 通常のJSON
+ * 2) "{\"pickerUri\":\"...\",\"exp\":...}" ← JSON文字列（二重JSON）
+ */
+function parseKvMaybeDoubleJson(raw: string): any | null {
+  try {
+    const first = JSON.parse(raw);
+
+    // 二重JSON：最初のparse結果が文字列なら、もう一回parseする
+    if (typeof first === "string") {
+      try {
+        return JSON.parse(first);
+      } catch {
+        return null;
+      }
+    }
+
+    // 通常JSON：オブジェクトのはず
+    return first;
+  } catch {
+    return null;
+  }
 }
