@@ -18,8 +18,7 @@ export const onRequestGet: PagesFunction<{
   // payload decode
   let payload: any;
   try {
-    const json = base64urlDecodeToString(payloadB64);
-    payload = JSON.parse(json);
+    payload = JSON.parse(base64urlDecodeToString(payloadB64));
   } catch {
     return new Response("Bad Request", { status: 400 });
   }
@@ -36,7 +35,6 @@ export const onRequestGet: PagesFunction<{
   if (!kv?.pickerUri) return html("リンクが無効です。LINEから最新リンクを開いてください。");
   if (typeof kv.exp === "number" && kv.exp < now) return html("リンクの有効期限が切れています。LINEから最新リンクを開いてください。");
 
-  // redirect
   return Response.redirect(kv.pickerUri, 302);
 };
 
@@ -55,7 +53,7 @@ function escapeHtml(s: string) {
 
 function base64urlDecodeToString(b64url: string): string {
   const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((b64url.length + 3) % 4);
-  const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   return new TextDecoder().decode(bytes);
 }
 
