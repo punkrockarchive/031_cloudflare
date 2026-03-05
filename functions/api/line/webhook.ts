@@ -72,16 +72,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   let body: LineWebhookBody;
   try {
     body = JSON.parse(rawBody);
-    
-    const groupIds = new Set<string>();
-    for (const ev of body.events ?? []) {
-      const gid = ev?.source?.groupId;
-      if (gid) groupIds.add(gid);
-    }
-    if (groupIds.size) {
-      console.log("[LINE] groupId(s):", Array.from(groupIds).join(","));
-    }
-    
   } catch {
     return new Response("bad json", { status: 400 });
   }
