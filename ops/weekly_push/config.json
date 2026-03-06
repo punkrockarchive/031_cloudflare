@@ -1,0 +1,6 @@
+{
+  "push_url": "https://cloudflare-1sr.pages.dev/api/line/push_weekly",
+  "post_url": "https://cloudflare-1sr.pages.dev/u?t=test123",
+  "text": "今週分です！",
+  "pull_api_key": "PUT_YOUR_PULL_API_KEY_HERE"
+}

@@ -1,219 +1,191 @@
-/**
- * /u?t=<payloadB64>~<sigB64>
- *
- * - Laravel が発行した署名付きトークンを検証（HMAC-SHA256）
- * - payload.sid をキーに Workers KV (GP_SESSIONS) から { pickerUri, exp } を取得
- * - pickerUri に 302 リダイレクトする
- *
- * デバッグ:
- *   ?dbg=1 を付けると KV 取得の可否や raw プレビュー等を JSON で返す（秘密は出さない）
- */
+// functions/u.ts
+// A-3: /u?t=... を受ける Cloudflare Pages Function
+// 役割:
+// 1. token の存在確認
+// 2. token の形式確認
+// 3. HMAC-SHA256 で署名検証
+// 4. 有効期限確認
+// 5. sid を取り出す
+// 6. sid に対応する pickerUri を取得する
+// 7. 最終的に 302 redirect を返す
 
-export const onRequestGet: PagesFunction<{
-  // Pages の「設定 > バインディング」で
-  // KV名前空間の変数名を GP_SESSIONS にしていること
-  GP_SESSIONS: KVNamespace;
-
-  // Pages の「設定 > 環境変数」で SIGNED_URL_SECRET_A を設定していること
-  SIGNED_URL_SECRET_A: string;
-}> = async (context) => {
-  // デプロイ反映確認用（好きな文字列でOK。毎回変える）
-  const BUILD = "u.ts-2026-03-03-0847";
-
-  const { env, request } = context;
-
-  // URL解析（クエリ取得用）
-  const url = new URL(request.url);
-
-  // dbg=1 のとき、KV取得状態をJSONで返す（原因切り分け用）
-  const dbg = url.searchParams.get("dbg") === "1";
-
-  // token: "<payloadB64>~<sigB64>"
-  const token = url.searchParams.get("t") || "";
-
-  // token 形式チェック
-  const sep = token.lastIndexOf("~");
-  if (sep <= 0) {
-    // token が無い or 区切りがおかしい
-    return new Response("Not Found", { status: 404 });
-  }
-
-  const payloadB64 = token.slice(0, sep);
-  const sigB64 = token.slice(sep + 1);
-
-  // 署名検証（payloadB64 を secret で HMAC したものが sigB64 と一致するか）
-  const expected = await hmacBase64Url(payloadB64, env.SIGNED_URL_SECRET_A);
-  if (!timingSafeEqual(sigB64, expected)) {
-    // 署名不一致（情報漏えいを避けるため 404）
-    return new Response("Not Found", { status: 404 });
-  }
-
-  // payload decode (base64url → JSON)
-  let payload: any;
-  try {
-    payload = JSON.parse(base64urlDecodeToString(payloadB64));
-  } catch {
-    return new Response("Bad Request", { status: 400 });
-  }
-
-  // payload の最低限のバリデーション
-  // v=2 / sid / exp が存在するか
-  if (payload?.v !== 2 || typeof payload?.sid !== "string" || typeof payload?.exp !== "number") {
-    return new Response("Bad Request", { status: 400 });
-  }
-
-  const now = Math.floor(Date.now() / 1000);
-
-  // トークン自体の期限チェック
-  if (payload.exp < now) {
-    return html("リンクの有効期限が切れています。LINEから最新リンクを開いてください。");
-  }
-
-  /**
-   * ここから KV 取得パート（重要）
-   * - get(..., "json") は環境差分で挙動が読みづらいので text で確実に取る
-   * - JSON 文字列を parse して pickerUri / exp を取り出す
-   */
-  // KVから取得（textで確実に読む）
-  const raw = await env.GP_SESSIONS.get(payload.sid);
-
-  // dbg=1 のときは KVの実体を確認（秘密は出さない）
-  if (dbg) {
-    const parsed = raw ? parseKvMaybeDoubleJson(raw) : null;
-
-    return new Response(
-      JSON.stringify(
-        {
-          build: BUILD,
-          sid: payload.sid,
-          hasRaw: !!raw,
-          rawPreview: raw ? raw.slice(0, 160) : null,
-          parsedType: parsed ? typeof parsed : null,
-          parsedKeys: parsed && typeof parsed === "object" ? Object.keys(parsed) : null,
-          parsedPickerUri: parsed?.pickerUri ?? null,
-          parsedExp: parsed?.exp ?? null,
-          now,
-          payloadExp: payload.exp,
-        },
-        null,
-        2
-      ),
-      {
-        status: 200,
-        headers: {
-          "content-type": "application/json; charset=utf-8",
-          "x-dpf-build": BUILD,
-        },
-      }
-    );
-  }
-
-  if (!raw) return html("リンクが無効です。LINEから最新リンクを開いてください。");
-
-  // KVの値は「JSONオブジェクト」または「JSON文字列（＝二重JSON）」の可能性があるため吸収する
-  const parsed = parseKvMaybeDoubleJson(raw);
-
-  const pickerUri = parsed?.pickerUri;
-  const exp = parsed?.exp;
-
-  if (!pickerUri || typeof pickerUri !== "string") {
-    return html("リンクが無効です。LINEから最新リンクを開いてください。");
-  }
-  if (typeof exp === "number" && exp < now) {
-    return html("リンクの有効期限が切れています。LINEから最新リンクを開いてください。");
-  }
-
-  return Response.redirect(pickerUri, 302);
+// 検証後に後続処理で使う最小の型
+// sid: どの投稿単位か
+// exp: token の有効期限（Unix time 秒）
+type ParsedToken = {
+  sid: string;
+  exp: number;
 };
 
-/** ユーザー向け簡易HTML（スマホでも読める） */
-function html(message: string) {
-  return new Response(
-    `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>フォトフレーム</title><body style="font-family:sans-serif;line-height:1.6;padding:24px">
-<h1>フォトフレーム</h1><p>${escapeHtml(message)}</p></body>`,
-    { status: 200, headers: { "content-type": "text/html; charset=utf-8" } }
-  );
+// base64url 文字列を UTF-8 テキストへ戻す関数
+// token の payload 部は URL に載せるため base64url 化されている想定
+function b64urlToText(input: string) {
+  // URL 安全形式の - と _ を通常の base64 形式へ戻す
+  const base64 = input.replace(/-/g, "+").replace(/_/g, "/");
+
+  // base64 の長さを 4 の倍数に揃えるために = を補う
+  const pad = "=".repeat((4 - (base64.length % 4)) % 4);
+
+  // atob で base64 をデコードし、JSON 文字列へ戻す
+  return atob(base64 + pad);
 }
 
-/** HTMLエスケープ（最低限） */
-function escapeHtml(s: string) {
-  return s.replace(
-    /[&<>"']/g,
-    (c) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[
-        c
-      ] as string)
-  );
-}
+// message を secret で HMAC-SHA256 署名し、base64url 文字列へ変換して返す関数
+// A-1 の token 発行側も、A-3 の検証側も、同じ方式である必要がある
+async function hmacSHA256Base64Url(message: string, secret: string) {
+  // 文字列を byte 配列へ変換するためのエンコーダ
+  const enc = new TextEncoder();
 
-/** base64url → 文字列（UTF-8） */
-function base64urlDecodeToString(b64url: string): string {
-  // base64url → base64
-  const b64 =
-    b64url.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((b64url.length + 3) % 4);
-
-  // atob → bytes → UTF-8
-  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
-}
-
-/**
- * HMAC-SHA256(message, secret) を base64url で返す
- * - message は payloadB64（＝ base64url文字列そのもの）
- */
-async function hmacBase64Url(message: string, secret: string): Promise<string> {
+  // HMAC-SHA256 用の秘密鍵を生成する
   const key = await crypto.subtle.importKey(
     "raw",
-    new TextEncoder().encode(secret),
+    enc.encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"]
   );
 
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+  // 指定 message に対する署名を計算する
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(message));
   const bytes = new Uint8Array(sig);
 
-  // bytes → binary string → base64
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
+  // btoa に渡すため、バイト列をバイナリ文字列へ詰め直す
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
 
-  // base64 → base64url
-  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  // base64 を URL 安全形式へ変換して返す
+  return btoa(s)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
-/**
- * timing-safe 文字列比較（簡易版）
- * - 署名比較の微妙な差を漏らさないため
- */
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let out = 0;
-  for (let i = 0; i < a.length; i++) out |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return out === 0;
+// token を分解・検証し、利用可能な sid / exp を返す関数
+// token 形式は「base64url(payload).sig」を想定する
+async function parseAndVerifyToken(token: string, secret: string): Promise<ParsedToken> {
+  // 「payload.署名」の2要素に分解する
+  const [payloadB64, sig] = token.split(".");
+
+  // 形式が崩れている場合は不正 token として扱う
+  if (!payloadB64 || !sig) {
+    throw new Error("invalid-token-format");
+  }
+
+  // payload 部に対して期待される署名を再計算する
+  // ここが一致しなければ token 改ざんとみなす
+  const expected = await hmacSHA256Base64Url(payloadB64, secret);
+  if (sig !== expected) {
+    throw new Error("invalid-signature");
+  }
+
+  // payload を base64url から JSON 文字列へ戻す
+  const payloadText = b64urlToText(payloadB64);
+  const payload = JSON.parse(payloadText);
+
+  // sid と exp がない token は業務上使えないため不正扱い
+  if (!payload.sid || !payload.exp) {
+    throw new Error("invalid-token-payload");
+  }
+
+  // 有効期限を過ぎていたら期限切れとする
+  if (Date.now() / 1000 > payload.exp) {
+    throw new Error("expired-token");
+  }
+
+  // この時点で初めて sid を信用して後続処理へ渡せる
+  return {
+    sid: payload.sid,
+    exp: payload.exp,
+  };
 }
 
-/**
- * KVの値が以下どちらでも同じ形にするためのパーサ
- * 1) {"pickerUri":"...","exp":...}  ← 通常のJSON
- * 2) "{\"pickerUri\":\"...\",\"exp\":...}" ← JSON文字列（二重JSON）
- */
-function parseKvMaybeDoubleJson(raw: string): any | null {
+// sid から pickerUri を取得する関数
+// 初版はコード内の固定マップを返すだけにし、後で KV / API に差し替えやすい形へ分離しておく
+async function getPickerUriBySid(sid: string, env: any): Promise<string | null> {
+  // 初版の固定マップ例
+  const sidMap: Record<string, string> = {
+    "2026-03-week1": "https://photos.google.com/share/AAAA",
+    "2026-03-week2": "https://photos.google.com/share/BBBB"
+  };
+
+  // sid に対応する URL があれば返し、無ければ null を返す
+  return sidMap[sid] || null;
+
+  // 将来の KV 版イメージ
+  // const key = `SID:${sid}`;
+  // return await env.LINE_KV.get(key);
+}
+
+// GET /u の本体
+export const onRequestGet = async ({ request, env }) => {
   try {
-    const first = JSON.parse(raw);
+    // 現在のURLから query parameter を取得する
+    const url = new URL(request.url);
 
-    // 二重JSON：最初のparse結果が文字列なら、もう一回parseする
-    if (typeof first === "string") {
-      try {
-        return JSON.parse(first);
-      } catch {
-        return null;
-      }
+    // LINE などから渡される token を t パラメータから読む
+    const token = url.searchParams.get("t");
+
+    // token が無い場合は 400
+    if (!token) {
+      return new Response("Bad Request: token required", { status: 400 });
     }
 
-    // 通常JSON：オブジェクトのはず
-    return first;
-  } catch {
-    return null;
+    // 署名検証用 secret が設定されていない場合はサーバ設定不備
+    if (!env.LINK_SIGNING_SECRET) {
+      return new Response("Internal Error: missing secret", { status: 500 });
+    }
+
+    // token を検証し、安全に sid / exp を取り出す
+    const parsed = await parseAndVerifyToken(token, env.LINK_SIGNING_SECRET);
+    const sid = parsed.sid;
+
+    // sid から最終遷移先 pickerUri を取得する
+    const pickerUri = await getPickerUriBySid(sid, env);
+
+    // 該当 sid の遷移先が未登録なら 404
+    if (!pickerUri) {
+      return new Response("Not Found: sid not found", { status: 404 });
+    }
+
+    // 最小限の運用ログを残す
+    // token 全文や secret は絶対に出さない
+    console.log(JSON.stringify({
+      route: "/u",
+      result: "redirect",
+      sid,
+      at: new Date().toISOString()
+    }));
+
+    // 正常時は pickerUri へ 302 リダイレクトする
+    return Response.redirect(pickerUri, 302);
+
+  } catch (e) {
+    // Error オブジェクトからエラー識別文字列を取得する
+    const msg = String((e as Error)?.message || e);
+
+    // token 形式不正 / payload 不正
+    if (msg.includes("invalid-token-format") || msg.includes("invalid-token-payload")) {
+      return new Response("Bad Request: invalid token", { status: 400 });
+    }
+
+    // 署名不一致
+    if (msg.includes("invalid-signature")) {
+      return new Response("Forbidden: invalid signature", { status: 403 });
+    }
+
+    // 期限切れ
+    if (msg.includes("expired-token")) {
+      return new Response("Gone: token expired", { status: 410 });
+    }
+
+    // 想定外エラー
+    console.log(JSON.stringify({
+      route: "/u",
+      result: "internal-error",
+      error: msg,
+      at: new Date().toISOString()
+    }));
+
+    return new Response("Internal Server Error", { status: 500 });
   }
-}
+};
